@@ -174,8 +174,8 @@ jobs:
         zip -r ${GITHUB_WORKSPACE}/device_tree_beryl.zip beryl
 
     - name: Build OrangeFox Recovery Image
-      working-directory: OrangeFox
       run: |
+        cd ${GITHUB_WORKSPACE}/OrangeFox
         set +e
         export USE_CCACHE=1
         export CCACHE_DIR=$(pwd)/.ccache
@@ -209,5 +209,4 @@ jobs:
           ## OrangeFox Recovery Build for beryl (Full Payload Extraction)
           * Device Codename: `beryl`
           * Target Partition: `vendor_boot` & `recovery`
-          * Build path fixed with working-directory setup.
-          
+          * Shell directory targeting fixed inline.

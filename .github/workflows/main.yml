@@ -1,4 +1,4 @@
-name: Build OrangeFox Recovery with Full Payload Extraction (beryl)
+name: Build OrangeFox via IQ-HARRY7 Tree (beryl)
 
 on:
   workflow_dispatch:
@@ -10,17 +10,18 @@ on:
       OFRP_BRANCH:
         description: 'OrangeFox Manifest Branch'
         required: true
-        default: '12.1'
+        default: 'fox_12.1'
         type: choice
         options:
-        - '12.1'
+        - 'fox_12.1'
+        - 'fox_11.0'
 
 permissions:
   contents: write
 
 jobs:
   build-recovery:
-    name: Build OrangeFox for beryl
+    name: Build Recovery for beryl
     runs-on: ubuntu-22.04
     steps:
     - name: Maximize build space
@@ -56,26 +57,20 @@ jobs:
         
         echo "Downloading stock ROM..."
         aria2c -c -x16 -s16 "$ROM_URL" -o rom.zip
-        
-        echo "Extracting ROM package..."
         unzip -q rom.zip || true
         
         if [ -f "payload.bin" ]; then
-          echo "Found payload.bin, downloading payload-dumper-go binary..."
+          echo "Dumping partition images via payload-dumper-go..."
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.3.0/payload-dumper-go_1.3.0_linux_amd64.tar.gz
           tar -xzf payload-dumper-go_1.3.0_linux_amd64.tar.gz
-          
-          echo "Dumping all partitions including vendor_boot, boot, dtbo, and EROFS images..."
           ./payload-dumper-go -o extracted_images payload.bin
         fi
-        
-        mkdir -p extracted_images
         ls -la extracted_images/
 
     - name: Initialize OrangeFox Workspace
       run: |
         OFRP_BRANCH="${{ inputs.OFRP_BRANCH }}"
-        OFRP_BRANCH=${OFRP_BRANCH:-12.1}
+        OFRP_BRANCH=${OFRP_BRANCH:-fox_12.1}
         
         mkdir -p ${GITHUB_WORKSPACE}/OrangeFox_sync
         cd ${GITHUB_WORKSPACE}/OrangeFox_sync
@@ -85,95 +80,48 @@ jobs:
         cd ${GITHUB_WORKSPACE}/OrangeFox_sync/sync
         ./orangefox_sync.sh --branch $OFRP_BRANCH --path${GITHUB_WORKSPACE}/OrangeFox
 
-    - name: Generate Complete Device Tree & Inject Extracted Images for beryl
+    - name: Clone External Device Tree & Inject Prebuilts
       run: |
-        DEVICE_NAME="beryl"
-        DEVICE_PATH="${GITHUB_WORKSPACE}/OrangeFox/device/xiaomi/${DEVICE_NAME}"
-        PREBUILT_PATH="$DEVICE_PATH/prebuilt"
-        mkdir -p "$PREBUILT_PATH"
+        DEVICE_PATH="${GITHUB_WORKSPACE}/OrangeFox/device/xiaomi/beryl"
         mkdir -p "$DEVICE_PATH"
         
+        echo "Cloning external device tree repository..."
+        git clone https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git -b khargosxh temp_dt
+        
+        rm -rf "$DEVICE_PATH"/*
+        cp -r temp_dt/* "$DEVICE_PATH"/
+        
         EXTRACTED="${GITHUB_WORKSPACE}/rom_extracted/extracted_images"
+        mkdir -p "$DEVICE_PATH/prebuilt"
         
-        [ -f "$EXTRACTED/vendor_boot.img" ] && cp "$EXTRACTED/vendor_boot.img" "$PREBUILT_PATH/vendor_boot.img"
-        [ -f "$EXTRACTED/boot.img" ] && cp "$EXTRACTED/boot.img" "$PREBUILT_PATH/boot.img"
-        [ -f "$EXTRACTED/dtbo.img" ] && cp "$EXTRACTED/dtbo.img" "$PREBUILT_PATH/dtbo.img"
-
-        cd "$DEVICE_PATH"
-        echo "Creating complete device tree with full partition mappings..."
+        [ -f "$EXTRACTED/boot.img" ] && cp "$EXTRACTED/boot.img" "$DEVICE_PATH/prebuilt/boot.img"
+        [ -f "$EXTRACTED/vendor_boot.img" ] && cp "$EXTRACTED/vendor_boot.img" "$DEVICE_PATH/prebuilt/vendor_boot.img"
+        [ -f "$EXTRACTED/dtbo.img" ] && cp "$EXTRACTED/dtbo.img" "$DEVICE_PATH/prebuilt/dtbo.img"
         
-        cat << 'EOF' > BoardConfig.mk
-        TARGET_ARCH := arm64
-        TARGET_ARCH_VARIANT := armv8-a
-        TARGET_CPU_ABI := arm64-v8a
-        TARGET_CPU_ABI2 := 
-        TARGET_CPU_VARIANT := cortex-a55
+        # Extract raw kernel from boot.img using AIK or unpack tools
+        if [ ! -f "$DEVICE_PATH/prebuilt/kernel" ] && [ -f "$EXTRACTED/boot.img" ]; then
+          echo "Extracting kernel binary from boot.img..."
+          git clone https://github.com/cyberknight777/AIK-Linux.git aik || true
+          if [ -d "aik" ]; then
+            cp "$EXTRACTED/boot.img" aik/
+            cd aik
+            ./unpackbootimg.sh boot.img || true
+            [ -f "split_img/boot.img-kernel" ] && cp split_img/boot.img-kernel "$DEVICE_PATH/prebuilt/kernel"
+            cd ..
+          fi
+        fi
 
-        TARGET_SUPPORTS_64_BIT_APPS := true
-        TARGET_IS_64_BIT := true
-
-        TARGET_NO_KERNEL := false
-        BOARD_KERNEL_PAGESIZE := 2048
-        BOARD_BOOTIMG_HEADER_VERSION := 4
-        BOARD_USES_VENDOR_BOOT := true
-        BOARD_INCLUDE_DTB_IN_BOOTIMG := true
-        BOARD_DTBOIMG_PARTITION_SIZE := 2097152
-
-        TARGET_PREBUILT_KERNEL := device/xiaomi/beryl/prebuilt/boot.img-kernel
-        BOARD_PREBUILT_DTBOIMAGE := device/xiaomi/beryl/prebuilt/dtbo.img
-        BOARD_PREBUILT_VENDOR_BOOT_IMAGE := device/xiaomi/beryl/prebuilt/vendor_boot.img
-
-        TW_INCLUDE_CRYPTO := true
-        TW_INCLUDE_CRYPTO_FBE := true
-        BOARD_USES_METADATA_PARTITION := true
-        TW_INCLUDE_XMLPARSER := true
+        # Append necessary decryption & FBE configuration flags to BoardConfig.mk safely
+        echo "" >> "$DEVICE_PATH/BoardConfig.mk"
+        echo "# Added Decryption & FBE Configuration Flags" >> "$DEVICE_PATH/BoardConfig.mk"
+        echo "TW_INCLUDE_CRYPTO := true" >> "$DEVICE_PATH/BoardConfig.mk"
+        echo "TW_INCLUDE_CRYPTO_FBE := true" >> "$DEVICE_PATH/BoardConfig.mk"
+        echo "BOARD_USES_METADATA_PARTITION := true" >> "$DEVICE_PATH/BoardConfig.mk"
+        echo "TW_INCLUDE_XMLPARSER := true" >> "$DEVICE_PATH/BoardConfig.mk"
         
-        FOX_USE_TWRP_RECOVERY_IMAGE_BUILDER := true
-        BOARD_HAS_NO_SELECT_BUTTON := true
-        
-        ALLOW_MISSING_DEPENDENCIES := true
-        
-        TW_THEME := portrait_hdpi
-        TARGET_SCREEN_HEIGHT := 2400
-        TARGET_SCREEN_WIDTH := 1080
-        TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
-        TW_INCLUDE_NTFS_3G := true
-        TW_EXCLUDE_TZDATA := true
-        EOF
+        ls -la "$DEVICE_PATH/prebuilt/"
 
-        cat << EOF > AndroidProducts.mk
-        PRODUCT_MAKEFILES := \
-            \$(LOCAL_DIR)/twrp_${DEVICE_NAME}.mk
-        EOF
-
-        cat << EOF > twrp_${DEVICE_NAME}.mk
-        \$(call inherit-product, \$(SRC_TARGET_DIR)/product/full_base_telephony.mk)
-        PRODUCT_NAME := twrp_${DEVICE_NAME}
-        PRODUCT_DEVICE := ${DEVICE_NAME}
-        PRODUCT_MANUFACTURER := xiaomi
-        PRODUCT_BRAND := xiaomi
-        PRODUCT_MODEL := Poco M7 Pro 5G
-        PRODUCT_AAPT_CONFIG := normal
-        PRODUCT_AAPT_PREF_CONFIG := xhdpi
-        EOF
-
-        touch BoardConfigVendor.mk
-        
-        mkdir -p rootdir/etc
-        cat << 'EOF' > rootdir/etc/recovery.fstab
-        /boot          emmc  /dev/block/by-name/boot          flags=display="Boot";backup=1;flashimg=1
-        /vendor_boot   emmc  /dev/block/by-name/vendor_boot   flags=display="Vendor_Boot";backup=1;flashimg=1
-        /recovery      emmc  /dev/block/by-name/recovery      flags=display="Recovery";backup=1;flashimg=1
-        /dtbo          emmc  /dev/block/by-name/dtbo          flags=display="DTBO";backup=1;flashimg=1
-        /metadata      ext4  /dev/block/by-name/metadata      flags=display="Metadata";backup=1;wrappedkey
-        /data          f2fs  /dev/block/by-name/userdata      flags=display="Data";encryptable=footer;length=-16384
-        /storage       ext4  /dev/block/by-name/userdata      flags=display="Storage";storage;wipeingui;removable
-        EOF
-
-        cd ${GITHUB_WORKSPACE}/OrangeFox/device/xiaomi
-        zip -r ${GITHUB_WORKSPACE}/device_tree_beryl.zip beryl
-
-    - name: Build OrangeFox Recovery Image
+    - name: Build Recovery Image
       run: |
         cd ${GITHUB_WORKSPACE}/OrangeFox
         set +e
@@ -202,11 +150,9 @@ jobs:
         files: |
           OrangeFox/out/target/product/*/*.img
           OrangeFox/out/target/product/*/*.zip
-          device_tree_beryl.zip
-        name: OrangeFox Recovery - beryl // ${{ env.BUILD_DATE }}
-        tag_name: ${{ github.run_id }}-orangefox
+        name: OrangeFox Recovery (IQ-HARRY7 Tree) - beryl // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}-harry-tree
         body: |
-          ## OrangeFox Recovery Build for beryl (Full Payload Extraction)
-          * Device Codename: `beryl`
-          * Target Partition: `vendor_boot` & `recovery`
-          * Shell directory targeting fixed inline.
+          ## OrangeFox Recovery Build for beryl
+          * Built using external device tree: `IQ-HARRY7/android_device_xiaomi_beryl_2` (branch `khargosxh`)
+          * Includes automated prebuilt kernel extraction, payload injection, and patched FBE decryption parameters.

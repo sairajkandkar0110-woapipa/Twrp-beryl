@@ -83,7 +83,7 @@ jobs:
         git config --global user.name "github-actions"
         git config --global user.email "actions@github.com"
         
-        repo init --depth=1 -u https://gitlab.com/OrangeFox/manifest.git -b $OFRP_BRANCH
+        repo init -u https://github.com/OrangeFoxRecovery/Manifest.git -b $OFRP_BRANCH --depth=1
         repo sync -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
     - name: Generate Complete Device Tree & Inject Assets for beryl
@@ -96,7 +96,6 @@ jobs:
         
         EXTRACTED="${GITHUB_WORKSPACE}/rom_extracted/extracted_images"
         
-        # Copy actual stock partition elements if extracted successfully
         [ -f "$EXTRACTED/vendor_boot.img" ] && cp "$EXTRACTED/vendor_boot.img" "$PREBUILT_PATH/vendor_boot.img"
         [ -f "$EXTRACTED/boot.img" ] && cp "$EXTRACTED/boot.img" "$PREBUILT_PATH/boot.img"
         [ -f "$EXTRACTED/dtbo.img" ] && cp "$EXTRACTED/dtbo.img" "$PREBUILT_PATH/dtbo.img"
@@ -121,18 +120,15 @@ jobs:
         BOARD_INCLUDE_DTB_IN_BOOTIMG := true
         BOARD_DTBOIMG_PARTITION_SIZE := 2097152
 
-        # Prebuilt recovery assets
         TARGET_PREBUILT_KERNEL := device/xiaomi/beryl/prebuilt/boot.img-kernel
         BOARD_PREBUILT_DTBOIMAGE := device/xiaomi/beryl/prebuilt/dtbo.img
         BOARD_PREBUILT_VENDOR_BOOT_IMAGE := device/xiaomi/beryl/prebuilt/vendor_boot.img
 
-        # OrangeFox / FBE Decryption Configuration & Keystore
         TW_INCLUDE_CRYPTO := true
         TW_INCLUDE_CRYPTO_FBE := true
         BOARD_USES_METADATA_PARTITION := true
         TW_INCLUDE_XMLPARSER := true
         
-        # OrangeFox Specific Flags
         FOX_USE_TWRP_RECOVERY_IMAGE_BUILDER := true
         BOARD_HAS_NO_SELECT_BUTTON := true
         

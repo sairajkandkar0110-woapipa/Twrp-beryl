@@ -102,7 +102,7 @@ jobs:
         fi
 
         cd "$DEVICE_PATH"
-        echo "Configuring device tree with correct architecture variables..."
+        echo "Configuring device tree with correct 64-bit variables..."
         
         cat << 'EOF' > BoardConfig.mk
         # Architecture Setup
@@ -111,6 +111,10 @@ jobs:
         TARGET_CPU_ABI := arm64-v8a
         TARGET_CPU_ABI2 := 
         TARGET_CPU_VARIANT := cortex-a55
+
+        # Force 64-bit runtime support
+        TARGET_SUPPORTS_64_BIT_APPS := true
+        TARGET_IS_64_BIT := true
 
         TARGET_NO_KERNEL := false
         BOARD_KERNEL_PAGESIZE := 2048
@@ -146,6 +150,8 @@ jobs:
         PRODUCT_MANUFACTURER := xiaomi
         PRODUCT_BRAND := xiaomi
         PRODUCT_MODEL := Poco M7 Pro 5G
+        PRODUCT_AAPT_CONFIG := normal
+        PRODUCT_AAPT_PREF_CONFIG := xhdpi
         EOF
 
         touch BoardConfigVendor.mk
@@ -160,7 +166,6 @@ jobs:
         /storage       ext4  /dev/block/by-name/userdata      flags=display="Storage";storage;wipeingui;removable
         EOF
 
-        # Package the device tree into a zip for artifact upload
         cd ${GITHUB_WORKSPACE}/TWRP/device/xiaomi
         zip -r ${GITHUB_WORKSPACE}/device_tree_beryl.zip beryl
 
@@ -201,5 +206,5 @@ jobs:
           ## Android 16 Stock-Derived Recovery (beryl)
           * Device Codename: `beryl`
           * Target Partition: `vendor_boot`
-          * Includes compiled recovery binaries and `device_tree_beryl.zip` source archive.
+          * Includes 64-bit runtime configurations and packaged device tree source archive.
           

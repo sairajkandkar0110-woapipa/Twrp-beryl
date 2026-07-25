@@ -42,16 +42,13 @@ jobs:
         sudo apt-get clean
         docker system prune -af --volumes 2>/dev/null || true
 
-    - name: Install Build Dependencies & Tools (EROFS & Sparse Utilities)
+    - name: Install Build Dependencies & Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 ccache python3 python3-pip android-sdk-libsparse-utils unzip device-tree-compiler cpio repo wget liblz4-tool
+        sudo apt-get install -y aria2 ccache python3 python3-pip android-sdk-libsparse-utils unzip device-tree-compiler cpio repo wget liblz4-tool erofs-utils
         pip3 install --no-cache-dir protobuf
-        
-        # Install erofs-utils to inspect and mount erofs images if needed
-        sudo apt-get install -y erofs-utils
 
-    - name: Download & Extract Stock ROM Payload (All Partitions: vendor_boot, boot, dtbo, product, system, etc.)
+    - name: Download & Extract Stock ROM Payload
       run: |
         ROM_URL="${{ inputs.ROM_URL }}"
         mkdir -p ${GITHUB_WORKSPACE}/rom_extracted
@@ -64,16 +61,15 @@ jobs:
         unzip -q rom.zip || true
         
         if [ -f "payload.bin" ]; then
-          echo "Found payload.bin, dumping all system, vendor, erofs and boot partitions..."
+          echo "Found payload.bin, dumping all partitions including EROFS containers..."
           git clone https://github.com/SeangKok/payload_dumper.git payload_tools || \
           git clone https://github.com/tfsp/payload_dumper.git payload_tools || true
           python3 payload_tools/payload_dumper.py payload.bin --out extracted_images/ || true
         fi
         
-        # List extracted partitions for logging confirmation
         ls -la extracted_images/
 
-    - name: Initialize OrangeFox Workspace via Official Sync Tool
+    - name: Initialize OrangeFox Workspace
       run: |
         OFRP_BRANCH="${{ inputs.OFRP_BRANCH }}"
         OFRP_BRANCH=${OFRP_BRANCH:-12.1}
@@ -84,7 +80,7 @@ jobs:
         
         mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
         cd ${GITHUB_WORKSPACE}/OrangeFox_sync/sync
-        ./orangefox_sync.sh --branch $OFRP_BRANCH --path${GITHUB_WORKSPACE}/OrangeFox
+        ./orangefox_sync.sh --branch $OFRP_BRANCH --path ${GITHUB_WORKSPACE}/OrangeFox
 
     - name: Generate Complete Device Tree & Inject Extracted Images for beryl
       run: |
@@ -96,7 +92,6 @@ jobs:
         
         EXTRACTED="${GITHUB_WORKSPACE}/rom_extracted/extracted_images"
         
-        # Copy individual target partition images
         [ -f "$EXTRACTED/vendor_boot.img" ] && cp "$EXTRACTED/vendor_boot.img" "$PREBUILT_PATH/vendor_boot.img"
         [ -f "$EXTRACTED/boot.img" ] && cp "$EXTRACTED/boot.img" "$PREBUILT_PATH/boot.img"
         [ -f "$EXTRACTED/dtbo.img" ] && cp "$EXTRACTED/dtbo.img" "$PREBUILT_PATH/dtbo.img"
@@ -125,7 +120,6 @@ jobs:
         BOARD_PREBUILT_DTBOIMAGE := device/xiaomi/beryl/prebuilt/dtbo.img
         BOARD_PREBUILT_VENDOR_BOOT_IMAGE := device/xiaomi/beryl/prebuilt/vendor_boot.img
 
-        # Decryption & FBE Configuration
         TW_INCLUDE_CRYPTO := true
         TW_INCLUDE_CRYPTO_FBE := true
         BOARD_USES_METADATA_PARTITION := true
@@ -199,7 +193,7 @@ jobs:
 
     - name: Set Release Properties
       run: |
-        echo "BUILD_DATE=$(date +\%Y\%m\%d-\%H\%M)" >> $GITHUB_ENV
+        echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
 
     - name: Upload Recovery Artifacts to Release
       uses: softprops/action-gh-release@master

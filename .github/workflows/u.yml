@@ -1,4 +1,4 @@
-    - name: Clone IQ-HARRY7 Tree, Patch Decryption, and Place in Root
+      name: Clone IQ-HARRY7 Tree, Patch Decryption, and Place in Root
       run: |
         echo "Cloning base device tree from IQ-HARRY7 (branch khargosxh)..."
         git clone --branch khargosxh https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git temp_dt

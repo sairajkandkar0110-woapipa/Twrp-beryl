@@ -33,7 +33,7 @@ jobs:
     - name: Install Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 unzip wget curl python3 python3-pip
+        sudo apt-get install -y aria2 unzip wget curl python3 python3-pip rsync
 
     - name: Download & Extract Stock ROM Payload
       run: |
@@ -55,12 +55,8 @@ jobs:
 
     - name: Clone IQ-HARRY7 Tree, Patch Decryption, and Place in Root
       run: |
-        echo "Cloning base device tree from IQ-HARRY7..."
-        git clone https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git temp_dt
-        
-        cd temp_dt
-        git checkout khargosxh
-        cd ..
+        echo "Cloning base device tree branch khargosxh..."
+        git clone --single-branch --branch khargosxh https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git temp_dt
         
         if [ ! -d "temp_dt" ]; then
           echo "Error: Failed to clone repository!"
@@ -70,8 +66,8 @@ jobs:
         # Clean current root files except git configs (.git, .github)
         find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' -exec rm -rf {} +
         
-        # Copy tree contents directly to repository root
-        cp -r temp_dt/* ./
+        # Safely copy tree contents using rsync to handle hidden/dot files too
+        rsync -av --exclude='.git' temp_dt/ ./
         rm -rf temp_dt
         
         EXTRACTED="rom_extracted/extracted_images"

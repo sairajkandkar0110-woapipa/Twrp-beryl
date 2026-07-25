@@ -160,6 +160,10 @@ jobs:
         /storage       ext4  /dev/block/by-name/userdata      flags=display="Storage";storage;wipeingui;removable
         EOF
 
+        # Package the device tree into a zip for artifact upload
+        cd ${GITHUB_WORKSPACE}/TWRP/device/xiaomi
+        zip -r ${GITHUB_WORKSPACE}/device_tree_beryl.zip beryl
+
     - name: Build Recovery Image
       run: |
         DEVICE_NAME="beryl"
@@ -190,11 +194,12 @@ jobs:
         files: |
           TWRP/out/target/product/*/*.img
           TWRP/out/target/product/*/*.zip
+          device_tree_beryl.zip
         name: Android 16 Recovery - beryl // ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}-recovery
         body: |
           ## Android 16 Stock-Derived Recovery (beryl)
           * Device Codename: `beryl`
           * Target Partition: `vendor_boot`
-          * Compatibility: Fixed ARM architecture target version variants.
+          * Includes compiled recovery binaries and `device_tree_beryl.zip` source archive.
           

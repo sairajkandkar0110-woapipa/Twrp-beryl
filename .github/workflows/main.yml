@@ -102,14 +102,15 @@ jobs:
         fi
 
         cd "$DEVICE_PATH"
-        echo "Configuring device tree for Android 16 target base..."
+        echo "Configuring device tree with correct architecture variables..."
         
         cat << 'EOF' > BoardConfig.mk
+        # Architecture Setup
         TARGET_ARCH := arm64
+        TARGET_ARCH_VARIANT := armv8-a
         TARGET_CPU_ABI := arm64-v8a
         TARGET_CPU_ABI2 := 
-        TARGET_CPU_VARIANT := generic
-        TARGET_CPU_SMP := true
+        TARGET_CPU_VARIANT := cortex-a55
 
         TARGET_NO_KERNEL := false
         BOARD_KERNEL_PAGESIZE := 2048
@@ -195,5 +196,5 @@ jobs:
           ## Android 16 Stock-Derived Recovery (beryl)
           * Device Codename: `beryl`
           * Target Partition: `vendor_boot`
-          * Compatibility: Tailored with complete PRODUCT_BRAND and PRODUCT_MODEL definitions.
+          * Compatibility: Fixed ARM architecture target version variants.
           

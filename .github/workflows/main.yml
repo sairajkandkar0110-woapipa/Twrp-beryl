@@ -1,4 +1,4 @@
-name: Build Bootable Recovery for Android 16 (beryl)
+name: Build OrangeFox Recovery with Extracted Assets (beryl)
 
 on:
   workflow_dispatch:
@@ -7,21 +7,21 @@ on:
         description: 'Direct URL to Stock Recovery/Fastboot ROM (.zip)'
         required: true
         default: 'https://share.google/oLrJd68V3BhwWwsi1'
-      TWRP_BRANCH:
-        description: 'TWRP Manifest Branch'
+      OFRP_BRANCH:
+        description: 'OrangeFox Manifest Branch'
         required: true
-        default: 'twrp-12.1'
+        default: 'fox_12.1'
         type: choice
         options:
-        - twrp-12.1
-        - twrp-11
+        - fox_12.1
+        - fox_11.0
 
 permissions:
   contents: write
 
 jobs:
   build-recovery:
-    name: Build Android 16 Compatible Recovery for beryl
+    name: Build OrangeFox for beryl
     runs-on: ubuntu-22.04
     steps:
     - name: Maximize build space
@@ -46,28 +46,10 @@ jobs:
     - name: Install Build Dependencies & Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 ccache python3 python3-pip android-sdk-libsparse-utils unzip
+        sudo apt-get install -y aria2 ccache python3 python3-pip android-sdk-libsparse-utils unzip device-tree-compiler cpio
         pip3 install --no-cache-dir protobuf
 
-    - name: Initialize TWRP Workspace
-      run: |
-        TWRP_BRANCH="${{ inputs.TWRP_BRANCH }}"
-        TWRP_BRANCH=${TWRP_BRANCH:-twrp-12.1}
-        
-        mkdir -p ~/bin
-        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-        chmod a+x ~/bin/repo
-        export PATH="${HOME}/bin:${PATH}"
-        
-        mkdir -p ${GITHUB_WORKSPACE}/TWRP
-        cd ${GITHUB_WORKSPACE}/TWRP
-        git config --global user.name "github-actions"
-        git config --global user.email "actions@github.com"
-        
-        repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b $TWRP_BRANCH
-        repo sync -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
-
-    - name: Download & Extract Stock ROM Images
+    - name: Download & Extract Stock ROM Images & Kernel
       run: |
         ROM_URL="${{ inputs.ROM_URL }}"
         mkdir -p ${GITHUB_WORKSPACE}/rom_extracted
@@ -86,33 +68,49 @@ jobs:
           python3 payload_tools/payload_dumper.py payload.bin --out extracted_images/ || true
         fi
 
-    - name: Generate Android 16 Compatible Device Tree for beryl
+    - name: Initialize OrangeFox Workspace
+      run: |
+        OFRP_BRANCH="${{ inputs.OFRP_BRANCH }}"
+        OFRP_BRANCH=${OFRP_BRANCH:-fox_12.1}
+        
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        export PATH="${HOME}/bin:${PATH}"
+        
+        mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
+        cd ${GITHUB_WORKSPACE}/OrangeFox
+        git config --global user.name "github-actions"
+        git config --global user.email "actions@github.com"
+        
+        repo init --depth=1 -u https://gitlab.com/OrangeFox/manifest.git -b $OFRP_BRANCH
+        repo sync -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+    - name: Generate Complete Device Tree & Inject Assets for beryl
       run: |
         DEVICE_NAME="beryl"
-        DEVICE_PATH="${GITHUB_WORKSPACE}/TWRP/device/xiaomi/${DEVICE_NAME}"
+        DEVICE_PATH="${GITHUB_WORKSPACE}/OrangeFox/device/xiaomi/${DEVICE_NAME}"
         PREBUILT_PATH="$DEVICE_PATH/prebuilt"
         mkdir -p "$PREBUILT_PATH"
         mkdir -p "$DEVICE_PATH"
         
-        if [ -f "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/vendor_boot.img" ]; then
-          cp "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/vendor_boot.img" "$PREBUILT_PATH/vendor_boot.img"
-        fi
-        if [ -f "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/boot.img" ]; then
-          cp "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/boot.img" "$PREBUILT_PATH/boot.img"
-        fi
+        EXTRACTED="${GITHUB_WORKSPACE}/rom_extracted/extracted_images"
+        
+        # Copy actual stock partition elements if extracted successfully
+        [ -f "$EXTRACTED/vendor_boot.img" ] && cp "$EXTRACTED/vendor_boot.img" "$PREBUILT_PATH/vendor_boot.img"
+        [ -f "$EXTRACTED/boot.img" ] && cp "$EXTRACTED/boot.img" "$PREBUILT_PATH/boot.img"
+        [ -f "$EXTRACTED/dtbo.img" ] && cp "$EXTRACTED/dtbo.img" "$PREBUILT_PATH/dtbo.img"
 
         cd "$DEVICE_PATH"
-        echo "Configuring device tree with correct 64-bit variables..."
+        echo "Creating complete device tree with keystore and decryption assets..."
         
         cat << 'EOF' > BoardConfig.mk
-        # Architecture Setup
         TARGET_ARCH := arm64
         TARGET_ARCH_VARIANT := armv8-a
         TARGET_CPU_ABI := arm64-v8a
         TARGET_CPU_ABI2 := 
         TARGET_CPU_VARIANT := cortex-a55
 
-        # Force 64-bit runtime support
         TARGET_SUPPORTS_64_BIT_APPS := true
         TARGET_IS_64_BIT := true
 
@@ -121,12 +119,22 @@ jobs:
         BOARD_BOOTIMG_HEADER_VERSION := 4
         BOARD_USES_VENDOR_BOOT := true
         BOARD_INCLUDE_DTB_IN_BOOTIMG := true
+        BOARD_DTBOIMG_PARTITION_SIZE := 2097152
 
+        # Prebuilt recovery assets
         TARGET_PREBUILT_KERNEL := device/xiaomi/beryl/prebuilt/boot.img-kernel
-        
+        BOARD_PREBUILT_DTBOIMAGE := device/xiaomi/beryl/prebuilt/dtbo.img
+        BOARD_PREBUILT_VENDOR_BOOT_IMAGE := device/xiaomi/beryl/prebuilt/vendor_boot.img
+
+        # OrangeFox / FBE Decryption Configuration & Keystore
         TW_INCLUDE_CRYPTO := true
         TW_INCLUDE_CRYPTO_FBE := true
         BOARD_USES_METADATA_PARTITION := true
+        TW_INCLUDE_XMLPARSER := true
+        
+        # OrangeFox Specific Flags
+        FOX_USE_TWRP_RECOVERY_IMAGE_BUILDER := true
+        BOARD_HAS_NO_SELECT_BUTTON := true
         
         ALLOW_MISSING_DEPENDENCIES := true
         
@@ -161,18 +169,19 @@ jobs:
         /boot          emmc  /dev/block/by-name/boot          flags=display="Boot";backup=1;flashimg=1
         /vendor_boot   emmc  /dev/block/by-name/vendor_boot   flags=display="Vendor_Boot";backup=1;flashimg=1
         /recovery      emmc  /dev/block/by-name/recovery      flags=display="Recovery";backup=1;flashimg=1
+        /dtbo          emmc  /dev/block/by-name/dtbo          flags=display="DTBO";backup=1;flashimg=1
         /metadata      ext4  /dev/block/by-name/metadata      flags=display="Metadata";backup=1;wrappedkey
         /data          f2fs  /dev/block/by-name/userdata      flags=display="Data";encryptable=footer;length=-16384
         /storage       ext4  /dev/block/by-name/userdata      flags=display="Storage";storage;wipeingui;removable
         EOF
 
-        cd ${GITHUB_WORKSPACE}/TWRP/device/xiaomi
+        cd ${GITHUB_WORKSPACE}/OrangeFox/device/xiaomi
         zip -r ${GITHUB_WORKSPACE}/device_tree_beryl.zip beryl
 
-    - name: Build Recovery Image
+    - name: Build OrangeFox Recovery Image
       run: |
         DEVICE_NAME="beryl"
-        cd ${GITHUB_WORKSPACE}/TWRP
+        cd ${GITHUB_WORKSPACE}/OrangeFox
         
         set +e
         export USE_CCACHE=1
@@ -197,14 +206,14 @@ jobs:
       uses: softprops/action-gh-release@master
       with:
         files: |
-          TWRP/out/target/product/*/*.img
-          TWRP/out/target/product/*/*.zip
+          OrangeFox/out/target/product/*/*.img
+          OrangeFox/out/target/product/*/*.zip
           device_tree_beryl.zip
-        name: Android 16 Recovery - beryl // ${{ env.BUILD_DATE }}
-        tag_name: ${{ github.run_id }}-recovery
+        name: OrangeFox Recovery - beryl // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}-orangefox
         body: |
-          ## Android 16 Stock-Derived Recovery (beryl)
+          ## OrangeFox Recovery Build for beryl
           * Device Codename: `beryl`
-          * Target Partition: `vendor_boot`
-          * Includes 64-bit runtime configurations and packaged device tree source archive.
+          * Target Partition: `vendor_boot` & `recovery`
+          * Includes extracted stock kernel, dtbo, vendor_boot, keystore decryption flags, and packaged device tree source archive.
           

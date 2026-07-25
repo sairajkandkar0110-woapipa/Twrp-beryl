@@ -1,4 +1,4 @@
-name: Build OrangeFox Recovery with Extracted Assets (beryl)
+name: Build OrangeFox Recovery with Full Payload Extraction (beryl)
 
 on:
   workflow_dispatch:
@@ -10,11 +10,10 @@ on:
       OFRP_BRANCH:
         description: 'OrangeFox Manifest Branch'
         required: true
-        default: 'fox_12.1'
+        default: '12.1'
         type: choice
         options:
-        - fox_12.1
-        - fox_11.0
+        - '12.1'
 
 permissions:
   contents: write
@@ -43,13 +42,16 @@ jobs:
         sudo apt-get clean
         docker system prune -af --volumes 2>/dev/null || true
 
-    - name: Install Build Dependencies & Tools
+    - name: Install Build Dependencies & Tools (EROFS & Sparse Utilities)
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 ccache python3 python3-pip android-sdk-libsparse-utils unzip device-tree-compiler cpio
+        sudo apt-get install -y aria2 ccache python3 python3-pip android-sdk-libsparse-utils unzip device-tree-compiler cpio repo wget liblz4-tool
         pip3 install --no-cache-dir protobuf
+        
+        # Install erofs-utils to inspect and mount erofs images if needed
+        sudo apt-get install -y erofs-utils
 
-    - name: Download & Extract Stock ROM Images & Kernel
+    - name: Download & Extract Stock ROM Payload (All Partitions: vendor_boot, boot, dtbo, product, system, etc.)
       run: |
         ROM_URL="${{ inputs.ROM_URL }}"
         mkdir -p ${GITHUB_WORKSPACE}/rom_extracted
@@ -62,31 +64,29 @@ jobs:
         unzip -q rom.zip || true
         
         if [ -f "payload.bin" ]; then
-          echo "Found payload.bin, dumping images..."
+          echo "Found payload.bin, dumping all system, vendor, erofs and boot partitions..."
           git clone https://github.com/SeangKok/payload_dumper.git payload_tools || \
           git clone https://github.com/tfsp/payload_dumper.git payload_tools || true
           python3 payload_tools/payload_dumper.py payload.bin --out extracted_images/ || true
         fi
+        
+        # List extracted partitions for logging confirmation
+        ls -la extracted_images/
 
-    - name: Initialize OrangeFox Workspace
+    - name: Initialize OrangeFox Workspace via Official Sync Tool
       run: |
         OFRP_BRANCH="${{ inputs.OFRP_BRANCH }}"
-        OFRP_BRANCH=${OFRP_BRANCH:-fox_12.1}
+        OFRP_BRANCH=${OFRP_BRANCH:-12.1}
         
-        mkdir -p ~/bin
-        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-        chmod a+x ~/bin/repo
-        export PATH="${HOME}/bin:${PATH}"
+        mkdir -p ${GITHUB_WORKSPACE}/OrangeFox_sync
+        cd ${GITHUB_WORKSPACE}/OrangeFox_sync
+        git clone https://gitlab.com/OrangeFox/sync.git
         
         mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
-        cd ${GITHUB_WORKSPACE}/OrangeFox
-        git config --global user.name "github-actions"
-        git config --global user.email "actions@github.com"
-        
-        repo init -u https://github.com/OrangeFoxRecovery/Manifest.git -b $OFRP_BRANCH --depth=1
-        repo sync -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+        cd ${GITHUB_WORKSPACE}/OrangeFox_sync/sync
+        ./orangefox_sync.sh --branch $OFRP_BRANCH --path${GITHUB_WORKSPACE}/OrangeFox
 
-    - name: Generate Complete Device Tree & Inject Assets for beryl
+    - name: Generate Complete Device Tree & Inject Extracted Images for beryl
       run: |
         DEVICE_NAME="beryl"
         DEVICE_PATH="${GITHUB_WORKSPACE}/OrangeFox/device/xiaomi/${DEVICE_NAME}"
@@ -96,12 +96,13 @@ jobs:
         
         EXTRACTED="${GITHUB_WORKSPACE}/rom_extracted/extracted_images"
         
+        # Copy individual target partition images
         [ -f "$EXTRACTED/vendor_boot.img" ] && cp "$EXTRACTED/vendor_boot.img" "$PREBUILT_PATH/vendor_boot.img"
         [ -f "$EXTRACTED/boot.img" ] && cp "$EXTRACTED/boot.img" "$PREBUILT_PATH/boot.img"
         [ -f "$EXTRACTED/dtbo.img" ] && cp "$EXTRACTED/dtbo.img" "$PREBUILT_PATH/dtbo.img"
 
         cd "$DEVICE_PATH"
-        echo "Creating complete device tree with keystore and decryption assets..."
+        echo "Creating complete device tree with full partition mappings..."
         
         cat << 'EOF' > BoardConfig.mk
         TARGET_ARCH := arm64
@@ -124,6 +125,7 @@ jobs:
         BOARD_PREBUILT_DTBOIMAGE := device/xiaomi/beryl/prebuilt/dtbo.img
         BOARD_PREBUILT_VENDOR_BOOT_IMAGE := device/xiaomi/beryl/prebuilt/vendor_boot.img
 
+        # Decryption & FBE Configuration
         TW_INCLUDE_CRYPTO := true
         TW_INCLUDE_CRYPTO_FBE := true
         BOARD_USES_METADATA_PARTITION := true
@@ -188,6 +190,7 @@ jobs:
         
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
+        export FOX_BUILD_DEVICE="beryl"
         set -e
         
         lunch twrp_${DEVICE_NAME}-eng
@@ -208,8 +211,8 @@ jobs:
         name: OrangeFox Recovery - beryl // ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}-orangefox
         body: |
-          ## OrangeFox Recovery Build for beryl
+          ## OrangeFox Recovery Build for beryl (Full Payload Extraction)
           * Device Codename: `beryl`
           * Target Partition: `vendor_boot` & `recovery`
-          * Includes extracted stock kernel, dtbo, vendor_boot, keystore decryption flags, and packaged device tree source archive.
+          * Extracted: Automatically extracts all partition files (`vendor_boot.img`, `boot.img`, `dtbo.img`, and EROFS file system containers) out of `payload.bin`.
           

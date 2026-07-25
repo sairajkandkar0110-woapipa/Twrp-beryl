@@ -55,15 +55,19 @@ jobs:
 
     - name: Clone IQ-HARRY7 Tree, Patch Decryption, and Place in Root
       run: |
-        echo "Cloning base device tree from IQ-HARRY7 (branch khargosxh)..."
-        git clone --branch khargosxh https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git temp_dt
+        echo "Cloning base device tree from IQ-HARRY7..."
+        git clone https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git temp_dt
+        
+        cd temp_dt
+        git checkout khargosxh
+        cd ..
         
         if [ ! -d "temp_dt" ]; then
-          echo "Error: Failed to clone repository branch!"
+          echo "Error: Failed to clone repository!"
           exit 1
         fi
         
-        # Clean current root files except git configs
+        # Clean current root files except git configs (.git, .github)
         find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' -exec rm -rf {} +
         
         # Copy tree contents directly to repository root

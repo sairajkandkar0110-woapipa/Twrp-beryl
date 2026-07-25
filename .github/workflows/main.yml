@@ -174,10 +174,8 @@ jobs:
         zip -r ${GITHUB_WORKSPACE}/device_tree_beryl.zip beryl
 
     - name: Build OrangeFox Recovery Image
+      working-directory: OrangeFox
       run: |
-        DEVICE_NAME="beryl"
-        cd ${GITHUB_WORKSPACE}/OrangeFox
-        
         set +e
         export USE_CCACHE=1
         export CCACHE_DIR=$(pwd)/.ccache
@@ -190,7 +188,7 @@ jobs:
         export FOX_BUILD_DEVICE="beryl"
         set -e
         
-        lunch twrp_${DEVICE_NAME}-eng
+        lunch twrp_beryl-eng
         make clean
         mka adbd vendorbootimage recoveryimage
 
@@ -211,5 +209,5 @@ jobs:
           ## OrangeFox Recovery Build for beryl (Full Payload Extraction)
           * Device Codename: `beryl`
           * Target Partition: `vendor_boot` & `recovery`
-          * Build workspace path bug fixed.
+          * Build path fixed with working-directory setup.
           

@@ -27,6 +27,14 @@ jobs:
         remove-codeql: 'true'
         remove-docker-images: 'true'
 
+    - name: Aggressive Cleanup
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                    "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+        sudo apt-get clean
+        docker system prune -af --volumes 2>/dev/null || true
+
     - name: Checkout Repository
       uses: actions/checkout@v4
 

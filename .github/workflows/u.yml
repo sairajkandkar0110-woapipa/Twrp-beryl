@@ -1,4 +1,59 @@
-      name: Clone IQ-HARRY7 Tree, Patch Decryption, and Place in Root
+name: Generate & Commit Device Tree to Root (beryl)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ROM_URL:
+        description: 'Direct URL to Stock Recovery/Fastboot ROM (.zip)'
+        required: true
+        default: 'https://share.google/oLrJd68V3BhwWwsi1'
+
+permissions:
+  contents: write
+
+jobs:
+  push-dt:
+    name: Commit & Push Device Tree to Root
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: '8192'
+        swap-size-mb: '1024'
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Install Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y aria2 unzip wget curl python3 python3-pip
+
+    - name: Download & Extract Stock ROM Payload
+      run: |
+        ROM_URL="${{ inputs.ROM_URL }}"
+        mkdir -p rom_extracted
+        cd rom_extracted
+        
+        echo "Downloading stock ROM..."
+        aria2c -c -x16 -s16 "$ROM_URL" -o rom.zip
+        unzip -q rom.zip || true
+        
+        if [ -f "payload.bin" ]; then
+          echo "Dumping partition images via payload-dumper-go..."
+          wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.3.0/payload-dumper-go_1.3.0_linux_amd64.tar.gz
+          tar -xzf payload-dumper-go_1.3.0_linux_amd64.tar.gz
+          ./payload-dumper-go -o extracted_images payload.bin
+        fi
+        ls -la extracted_images/
+
+    - name: Clone IQ-HARRY7 Tree, Patch Decryption, and Place in Root
       run: |
         echo "Cloning base device tree from IQ-HARRY7 (branch khargosxh)..."
         git clone --branch khargosxh https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git temp_dt
@@ -44,3 +99,11 @@
         echo "BOARD_USES_METADATA_PARTITION := true" >> BoardConfig.mk
         echo "TW_INCLUDE_XMLPARSER := true" >> BoardConfig.mk
         echo "TW_USE_TOOLBOX := true" >> BoardConfig.mk
+
+    - name: Commit and Push Changes to Repository
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add .
+        git commit -m "chore: update decrypted OrangeFox device tree for beryl from workflow" || echo "No changes to commit"
+        git push origin HEAD

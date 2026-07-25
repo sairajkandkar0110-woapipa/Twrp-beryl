@@ -33,7 +33,7 @@ jobs:
     - name: Install Tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 unzip wget curl python3 python3-pip rsync
+        sudo apt-get install -y aria2 unzip wget curl python3 python3-pip
 
     - name: Download & Extract Stock ROM Payload
       run: |
@@ -53,22 +53,23 @@ jobs:
         fi
         ls -la extracted_images/
 
-    - name: Clone IQ-HARRY7 Tree, Patch Decryption, and Place in Root
+    - name: Download Tree Archive, Patch Decryption, and Place in Root
       run: |
-        echo "Cloning base device tree branch khargosxh..."
-        git clone --single-branch --branch khargosxh https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2.git temp_dt
+        echo "Downloading IQ-HARRY7 tree archive (branch khargosxh)..."
+        wget -q https://github.com/IQ-HARRY7/android_device_xiaomi_beryl_2/archive/refs/heads/khargosxh.zip -O tree.zip
+        unzip -q tree.zip
         
-        if [ ! -d "temp_dt" ]; then
-          echo "Error: Failed to clone repository!"
+        if [ ! -d "android_device_xiaomi_beryl_2-khargosxh" ]; then
+          echo "Error: Failed to extract tree archive!"
           exit 1
         fi
         
         # Clean current root files except git configs (.git, .github)
         find . -maxdepth 1 ! -name '.' ! -name '.git' ! -name '.github' -exec rm -rf {} +
         
-        # Safely copy tree contents using rsync to handle hidden/dot files too
-        rsync -av --exclude='.git' temp_dt/ ./
-        rm -rf temp_dt
+        # Move tree contents directly to repository root
+        cp -r android_device_xiaomi_beryl_2-khargosxh/* ./
+        rm -rf android_device_xiaomi_beryl_2-khargosxh tree.zip
         
         EXTRACTED="rom_extracted/extracted_images"
         mkdir -p prebuilt
@@ -107,3 +108,4 @@ jobs:
         git add .
         git commit -m "chore: update decrypted OrangeFox device tree for beryl from workflow" || echo "No changes to commit"
         git push origin HEAD
+        

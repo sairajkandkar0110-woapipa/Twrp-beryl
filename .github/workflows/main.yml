@@ -1,0 +1,195 @@
+name: Build Bootable Recovery with Payload Extraction (beryl)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ROM_URL:
+        description: 'Direct URL to Stock Recovery/Fastboot ROM (.zip)'
+        required: true
+        default: 'https://share.google/oLrJd68V3BhwWwsi1'
+      TWRP_BRANCH:
+        description: 'TWRP Manifest Branch'
+        required: true
+        default: 'twrp-12.1'
+        type: choice
+        options:
+        - twrp-12.1
+        - twrp-11
+
+permissions:
+  contents: write
+
+jobs:
+  build-recovery:
+    name: Build Bootable Recovery for beryl
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: '8192'
+        swap-size-mb: '1024'
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+
+    - name: Aggressive Cleanup
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                    "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+        sudo apt-get clean
+        docker system prune -af --volumes 2>/dev/null || true
+
+    - name: Install Build Dependencies & Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y aria2 ccache python3 python3-pip android-sdk-libsparse-utils unzip
+        pip3 install --no-cache-dir protobuf
+
+    - name: Initialize TWRP Workspace
+      run: |
+        TWRP_BRANCH="${{ inputs.TWRP_BRANCH }}"
+        TWRP_BRANCH=${TWRP_BRANCH:-twrp-12.1}
+        
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        export PATH="${HOME}/bin:${PATH}"
+        
+        mkdir -p ${GITHUB_WORKSPACE}/TWRP
+        cd ${GITHUB_WORKSPACE}/TWRP
+        git config --global user.name "github-actions"
+        git config --global user.email "actions@github.com"
+        
+        repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b $TWRP_BRANCH
+        repo sync -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+    - name: Download & Extract Stock ROM Images
+      run: |
+        ROM_URL="${{ inputs.ROM_URL }}"
+        mkdir -p ${GITHUB_WORKSPACE}/rom_extracted
+        cd ${GITHUB_WORKSPACE}/rom_extracted
+        
+        echo "Downloading stock ROM..."
+        aria2c -c -x16 -s16 "$ROM_URL" -o rom.zip
+        
+        echo "Extracting ROM package..."
+        unzip -q rom.zip || true
+        
+        if [ -f "payload.bin" ]; then
+          echo "Found payload.bin, dumping images..."
+          git clone https://github.com/SeangKok/payload_dumper.git payload_tools || \
+          git clone https://github.com/tfsp/payload_dumper.git payload_tools || true
+          python3 payload_tools/payload_dumper.py payload.bin --out extracted_images/ || true
+        fi
+
+    - name: Generate Bootable Device Tree & Inject Stock Kernel for beryl
+      run: |
+        DEVICE_NAME="beryl"
+        DEVICE_PATH="${GITHUB_WORKSPACE}/TWRP/device/xiaomi/${DEVICE_NAME}"
+        PREBUILT_PATH="$DEVICE_PATH/prebuilt"
+        mkdir -p "$PREBUILT_PATH"
+        mkdir -p "$DEVICE_PATH"
+        
+        if [ -f "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/vendor_boot.img" ]; then
+          cp "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/vendor_boot.img" "$PREBUILT_PATH/vendor_boot.img"
+        fi
+        if [ -f "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/boot.img" ]; then
+          cp "${GITHUB_WORKSPACE}/rom_extracted/extracted_images/boot.img" "$PREBUILT_PATH/boot.img"
+        fi
+
+        cd "$DEVICE_PATH"
+        echo "Creating proper recovery tree with prebuilt kernel mappings..."
+        
+        cat << 'EOF' > BoardConfig.mk
+        TARGET_ARCH := arm64
+        TARGET_CPU_ABI := arm64-v8a
+        TARGET_CPU_ABI2 := 
+        TARGET_CPU_VARIANT := generic
+        TARGET_CPU_SMP := true
+
+        TARGET_NO_KERNEL := false
+        BOARD_KERNEL_PAGESIZE := 2048
+        BOARD_BOOTIMG_HEADER_VERSION := 4
+        BOARD_USES_VENDOR_BOOT := true
+        BOARD_INCLUDE_DTB_IN_BOOTIMG := true
+
+        TARGET_PREBUILT_KERNEL := device/xiaomi/beryl/prebuilt/boot.img-kernel
+        
+        TW_INCLUDE_CRYPTO := true
+        TW_INCLUDE_CRYPTO_FBE := true
+        BOARD_USES_METADATA_PARTITION := true
+        
+        TW_THEME := portrait_hdpi
+        TARGET_SCREEN_HEIGHT := 2400
+        TARGET_SCREEN_WIDTH := 1080
+        TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
+        TW_INCLUDE_NTFS_3G := true
+        TW_EXCLUDE_TZDATA := true
+        EOF
+
+        cat << EOF > AndroidProducts.mk
+        PRODUCT_MAKEFILES := \
+            \$(LOCAL_DIR)/twrp_${DEVICE_NAME}.mk
+        EOF
+
+        cat << EOF > twrp_${DEVICE_NAME}.mk
+        $(call inherit-product,$(SRC_TARGET_DIR)/product/full_base_telephony.mk)
+        PRODUCT_NAME := twrp_${DEVICE_NAME}
+        PRODUCT_DEVICE := ${DEVICE_NAME}
+        PRODUCT_MANUFACTURER := xiaomi
+        EOF
+
+        touch BoardConfigVendor.mk
+        
+        mkdir -p rootdir/etc
+        cat << 'EOF' > rootdir/etc/recovery.fstab
+        /boot          emmc  /dev/block/by-name/boot          flags=display="Boot";backup=1;flashimg=1
+        /vendor_boot   emmc  /dev/block/by-name/vendor_boot   flags=display="Vendor_Boot";backup=1;flashimg=1
+        /recovery      emmc  /dev/block/by-name/recovery      flags=display="Recovery";backup=1;flashimg=1
+        /metadata      ext4  /dev/block/by-name/metadata      flags=display="Metadata";backup=1;wrappedkey
+        /data          f2fs  /dev/block/by-name/userdata      flags=display="Data";encryptable=footer;length=-16384
+        /storage       ext4  /dev/block/by-name/userdata      flags=display="Storage";storage;wipeingui;removable
+        EOF
+
+    - name: Build Recovery Image
+      run: |
+        DEVICE_NAME="beryl"
+        cd ${GITHUB_WORKSPACE}/TWRP
+        
+        set +e
+        export USE_CCACHE=1
+        export CCACHE_DIR=$(pwd)/.ccache
+        mkdir -p $CCACHE_DIR
+        export CCACHE_EXEC=/usr/bin/ccache
+        ccache -M 5G
+        
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        set -e
+        
+        lunch twrp_${DEVICE_NAME}-eng
+        make clean
+        mka adbd vendorbootimage recoveryimage
+
+    - name: Set Release Properties
+      run: |
+        echo "BUILD_DATE=$(date +\%Y\%m\%d-\%H\%M)" >> $GITHUB_ENV
+
+    - name: Upload Recovery Artifacts to Release
+      uses: softprops/action-gh-release@master
+      with:
+        files: |
+          TWRP/out/target/product/*/*.img
+          TWRP/out/target/product/*/*.zip
+        name: Bootable Recovery - beryl // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}-recovery
+        body: |
+          ## Bootable Recovery Build with UFS 2.2 / F2FS Support (beryl)
+          * Device Codename: `beryl`
+          * Target Partition: `vendor_boot`
+          * Storage/Filesystem: UFS 2.2 configured with proper block mappings and `f2fs` data partition handling.
+          

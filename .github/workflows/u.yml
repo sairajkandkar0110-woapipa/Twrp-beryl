@@ -167,11 +167,19 @@ jobs:
     - name: Patch recovery.fstab (F2FS Inlinecrypt)
       run: |
         TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
-        FSTAB=$(find $TREE_PATH -name "recovery.fstab" | head -n 1)
+        
+        # Broaden search to catch either recovery.fstab or twrp.fstab
+        FSTAB=$(find $TREE_PATH -name "recovery.fstab" -o -name "twrp.fstab" | head -n 1)
         
         if [ -n "$FSTAB" ]; then
-          echo "Patching /data f2fs encryption flags in $FSTAB..."
-          sed -i 's|fileencryption=aes-256-xts:aes-256-cts:v2|fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized|g' "$FSTAB"
+          echo "Found fstab at $FSTAB. Patching /data encryption flags..."
+          # Use a wildcard regex to catch and replace ANY existing fileencryption flag
+          sed -i 's|fileencryption=[^, ]*|fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized|g' "$FSTAB"
+          
+          echo "Verifying patch in build log..."
+          grep "fileencryption" "$FSTAB" || echo "Note: No explicit fileencryption line found to patch."
+        else
+          echo "WARNING: No fstab file found in device tree!"
         fi
 
     - name: Commit and Push to Repository Root
@@ -192,7 +200,7 @@ jobs:
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
         
         git add --all
-        git commit -m "feat: Auto-generate clean device tree with DTBO, kernel, and extended vendor blobs" || echo "No changes to commit"
+        git commit -m "feat: Auto-generate clean device tree with kernel, dtbo, and patched fstab" || echo "No changes to commit"
         
         BRANCH=${GITHUB_REF#refs/heads/}
         
@@ -201,3 +209,4 @@ jobs:
         
         echo "Pushing device tree to repository..."
         git push origin HEAD:$BRANCH
+        

@@ -13,7 +13,7 @@ jobs:
     name: Extract and Generate Tree
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
+      contents: write # Required to allow GitHub Actions to push commits
     
     steps:
     - name: Checkout Repository
@@ -58,6 +58,7 @@ jobs:
             f = os.path.join(p, 'sebaubuntu_libs', 'libandroid', 'fstab', '__init__.py')
             if os.path.exists(f):
                 with open(f, 'r') as r: d = r.read()
+                # Rewrite the strict 5-variable split rule to automatically pad missing columns
                 d = d.replace('src, mount_point, fs_type, mnt_flags, fs_flags = line.split()', 'src, mount_point, fs_type, mnt_flags, fs_flags = (line.split() + [\"\", \"\", \"\", \"\"])[:5]')
                 with open(f, 'w') as w: w.write(d)
         "
@@ -180,5 +181,15 @@ jobs:
         
         git add --all
         git commit -m "feat: Auto-generate clean device tree with kernel and blobs" || echo "No changes to commit"
-        git push origin HEAD
+        
+        # Identify the current branch
+        BRANCH=${GITHUB_REF#refs/heads/}
+        
+        # Pull any changes made to the repository while this workflow was running
+        echo "Syncing with remote branch $BRANCH..."
+        git pull --rebase origin $BRANCH
+        
+        # Push the final device tree
+        echo "Pushing device tree to repository..."
+        git push origin HEAD:$BRANCH
         

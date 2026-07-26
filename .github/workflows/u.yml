@@ -22,7 +22,7 @@ jobs:
     - name: Set up Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 p7zip-full cpio lz4 wget
+        sudo apt-get install -y aria2 p7zip-full cpio lz4 wget mkbootimg curl
         pip3 install twrpdtgen
 
     - name: Install payload-dumper-go
@@ -67,8 +67,8 @@ jobs:
 
     - name: Extract Kernel from boot.img
       run: |
-        echo "Downloading AOSP unpack_bootimg.py..."
-        wget -q https://raw.githubusercontent.com/aosp-mirror/platform_system_tools_mkbootimg/master/unpack_bootimg.py
+        echo "Downloading LineageOS unpack_bootimg.py..."
+        curl -sL "https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-21.0/unpack_bootimg.py" -o unpack_bootimg.py
         
         echo "Unpacking boot.img..."
         mkdir -p extracted_boot

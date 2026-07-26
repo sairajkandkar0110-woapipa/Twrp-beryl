@@ -19,6 +19,11 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
+    - name: Scrub Existing Repository Files First
+      run: |
+        echo "Clearing out all files in the repository root except .github..."
+        find . -mindepth 1 -maxdepth 1 ! -name '.github' -exec rm -rf {} +
+
     - name: Set up Environment
       run: |
         sudo apt-get update
@@ -83,14 +88,12 @@ jobs:
         cp extracted/dtbo.img $TREE_PATH/prebuilt/dtbo.img
         
         echo "Ensuring BoardConfig.mk points to the prebuilt kernel and DTBO..."
-        # Link Kernel
         if grep -q "TARGET_PREBUILT_KERNEL" $TREE_PATH/BoardConfig.mk; then
           sed -i 's|TARGET_PREBUILT_KERNEL := .*|TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel|g' $TREE_PATH/BoardConfig.mk
         else
           echo "TARGET_PREBUILT_KERNEL := \$(DEVICE_PATH)/prebuilt/kernel" >> $TREE_PATH/BoardConfig.mk
         fi
         
-        # Link DTBO
         if grep -q "BOARD_PREBUILT_DTBOIMAGE" $TREE_PATH/BoardConfig.mk; then
           sed -i 's|BOARD_PREBUILT_DTBOIMAGE := .*|BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/dtbo.img|g' $TREE_PATH/BoardConfig.mk
         else
@@ -164,38 +167,33 @@ jobs:
             libkeystore-wifi-hidl
         EOF
 
-    - name: Patch recovery.fstab (F2FS Inlinecrypt)
+    - name: Patch recovery.fstab (Enforce Encryption Flags)
       run: |
         TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
-        
-        # Broaden search to catch either recovery.fstab or twrp.fstab
         FSTAB=$(find $TREE_PATH -name "recovery.fstab" -o -name "twrp.fstab" | head -n 1)
         
         if [ -n "$FSTAB" ]; then
-          echo "Found fstab at $FSTAB. Patching /data encryption flags..."
-          # Use a wildcard regex to catch and replace ANY existing fileencryption flag
-          sed -i 's|fileencryption=[^, ]*|fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized|g' "$FSTAB"
+          echo "Found fstab at $FSTAB."
           
-          echo "Verifying patch in build log..."
-          grep "fileencryption" "$FSTAB" || echo "Note: No explicit fileencryption line found to patch."
-        else
-          echo "WARNING: No fstab file found in device tree!"
+          if grep -q "/data" "$FSTAB"; then
+            echo "Patching /data entry..."
+            sed -i 's|.*/data.*|ext4 /dev/block/by-name/userdata /data flags=fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized;keydirectory=/metadata/vold/metadata_encryption|g' "$FSTAB"
+          fi
+          
+          echo "Updated fstab contents:"
+          cat "$FSTAB"
         fi
 
     - name: Commit and Push to Repository Root
       run: |
         TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
         
-        echo "Scrubbing repository root (keeping .git, .github, and working directories)..."
-        find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' ! -name 'workspace' ! -name 'extracted' ! -name 'extracted_boot' ! -name 'unpack_bootimg.py' -exec rm -rf {} +
-        
-        echo "Moving generated files to the root of the repository..."
+        echo "Moving generated files to repo root..."
         cp -a $TREE_PATH/* ./
         
-        echo "Cleaning up heavy intermediate files..."
+        echo "Cleaning up temporary build folders..."
         rm -rf workspace extracted extracted_boot payload-dumper-go unpack_bootimg.py
         
-        echo "Configuring git and pushing changes..."
         git config --global user.name "github-actions[bot]"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
         
@@ -203,10 +201,6 @@ jobs:
         git commit -m "feat: Auto-generate clean device tree with kernel, dtbo, and patched fstab" || echo "No changes to commit"
         
         BRANCH=${GITHUB_REF#refs/heads/}
-        
-        echo "Syncing with remote branch $BRANCH..."
         git pull --rebase origin $BRANCH
-        
-        echo "Pushing device tree to repository..."
         git push origin HEAD:$BRANCH
         

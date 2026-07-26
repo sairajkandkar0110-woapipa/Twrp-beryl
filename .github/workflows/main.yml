@@ -6,11 +6,11 @@ on:
       MANIFEST_BRANCH:
         description: 'OrangeFox Manifest Branch'
         required: true
-        default: '16.1'
+        default: '14.1'
         type: choice
         options:
         - 14.1
-        - 16.1
+        - 12.1
       DEVICE_PATH:
         description: 'Specify your Device Path'
         required: true
@@ -163,11 +163,10 @@ jobs:
           mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
         fi
 
-        if [ "${{ inputs.MANIFEST_BRANCH }}" = "16.1" ]; then
-          echo "Building for 16.1"
-          lunch twrp_${{ inputs.DEVICE_NAME }}-ap4a-${{ env.BUILD_TYPE }} || lunch twrp_${{ inputs.DEVICE_NAME }}-${{ env.BUILD_TYPE }}
+        if [ "${{ inputs.MANIFEST_BRANCH }}" = "12.1" ]; then
+          echo "Building for 12.1"
+          lunch twrp_${{ inputs.DEVICE_NAME }}-eng || lunch twrp_${{ inputs.DEVICE_NAME }}-userdebug
           make clean
-          # Explicitly compile adbd alongside the vendorboot image
           mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
         fi
 
@@ -191,4 +190,3 @@ jobs:
           Build Type: ${{ env.BUILD_TYPE }}
           Target: `${{ inputs.BUILD_TARGET }}image`
           Commit: Built from repository commit `${{ env.COMMIT_ID }}` using high-speed multi-threaded stock ROM extraction with ignored device tree kernel binaries and enforced ADB.
-          

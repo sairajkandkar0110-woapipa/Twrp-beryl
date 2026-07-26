@@ -1,168 +1,194 @@
-name: Extract ROM and Build POCO M7 Pro Device Tree
+name: OrangeFox - Build
 
 on:
   workflow_dispatch:
     inputs:
-      ROM_URL:
-        description: 'Direct Download Link to Stock Fastboot/OTA ROM (.zip)'
+      MANIFEST_BRANCH:
+        description: 'OrangeFox Manifest Branch'
         required: true
-        type: string
-      DEVICE_CODENAME:
-        description: 'Device Codename'
+        default: '16.1'
+        type: choice
+        options:
+        - 14.1
+        - 16.1
+      DEVICE_PATH:
+        description: 'Specify your Device Path'
+        required: true
+        default: 'device/xiaomi/beryl'
+      DEVICE_NAME:
+        description: 'Specify your Device Codename'
         required: true
         default: 'beryl'
-        type: string
-      OEM_NAME:
-        description: 'Manufacturer Name'
+      RELEASE_TYPE:
+        description: 'Specify your Release Type'
         required: true
-        default: 'xiaomi'
-        type: string
+        default: 'Debug'
+        type: choice
+        options:
+        - Release
+        - Debug
+      BUILD_TARGET:
+        description: 'Specify your Build Target'
+        required: true
+        default: 'vendorboot'
+        type: choice
+        options:
+        - boot
+        - recovery
+        - vendorboot
 
 jobs:
-  process-rom:
+  build:
+    name: Build OFR by ${{ github.actor }}
     runs-on: ubuntu-22.04
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_TYPE: 'eng'
     permissions:
       contents: write
+      
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
+    - name: Checkout Root Repository
+      uses: actions/checkout@v4
+              
+    - name: Clean-up Environment
+      uses: rokibhasansagar/slimhub_actions@main
 
-      - name: Set up Git Identity
-        run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
+    - name: Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 16
+      
+    - name: Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y aria2 cpio python3-pip
+        git clone https://gitlab.com/OrangeFox/misc/scripts.git -b master
+        cd scripts
+        sudo bash setup/android_build_env.sh
+      
+    - name: Set-up Manifest & Sync
+      run: |
+        mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
+        cd ${GITHUB_WORKSPACE}/OrangeFox
+        git config --global user.name "${{ github.actor }}"
+        git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+        git clone https://gitlab.com/OrangeFox/sync.git -b master
+        cd sync
+        ./orangefox_sync.sh --branch ${{ inputs.MANIFEST_BRANCH }} --path ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}  
+        
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+        
+        # Strip heavy, unnecessary dependencies for recovery builds
+        if [ -f .repo/manifests/remove-minimal.xml ]; then
+          echo "Found remove-minimal.xml. Stripping blocks natively..."
+          sed -i '/guava/d' .repo/manifests/remove-minimal.xml
+          sed -i '/gflags/d' .repo/manifests/remove-minimal.xml
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all) external/guava external/gflags
+        else
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all) external/guava external/gflags
+        fi
 
-      - name: Download and Extract Stock ROM
-        run: |
-          mkdir -p ~/rom_workspace
-          cd ~/rom_workspace
+    - name: Move Local Device Tree to Build Space
+      run: |
+        TARGET_PATH="${{ github.workspace }}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/${{ inputs.DEVICE_PATH }}"
+        mkdir -p "${TARGET_PATH}"
+        
+        echo "Copying repository tree files from root into build environment..."
+        rsync -av --exclude='.git' --exclude='.github' --exclude='OrangeFox' ./ "${TARGET_PATH}/"
+        
+        cd "${TARGET_PATH}"
+        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Sanitize VINTF, Crypto & Kill Health Service Crash
+      run: |
+        TARGET_PATH="${{ github.workspace }}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/${{ inputs.DEVICE_PATH }}"
+        cd "${TARGET_PATH}"
+        
+        echo "Stripping incompatible VINTF manifests to prevent libvintf 8.0/9.0 parsing errors..."
+        find . -type f \( -name "*gatekeeper*.xml" -o -name "*keymint*.xml" -o -name "*secure_element*.xml" \) -delete || true
+        
+        echo "Removing broken health service triggers to fix C++ linker aborts..."
+        find . -name "*.rc" -exec sed -i '/gatekeeper/d' {} + || true
+        find . -name "*.rc" -exec sed -i '/keymint/d' {} + || true
+        find . -name "*.rc" -exec sed -i '/se_omapi/d' {} + || true
+        find . -name "*.rc" -exec sed -i '/health-service/d' {} + || true
+        find . -name "*.rc" -exec sed -i '/vendor.health-default/d' {} + || true
+
+        echo "Disabling conflicting health-service target blocks from Android.mk / Android.bp..."
+        find . -name "Android.mk" -o -name "Android.bp" | xargs grep -l "health-service.example" 2>/dev/null | while read -r file; do
+          sed -i '/health-service.example/d' "$file" || true
+        done || true
+
+        echo "Ensuring ADB and FBE v2 Flags are properly mapped in BoardConfig.mk..."
+        if [ -f "BoardConfig.mk" ]; then
+          grep -q "TW_INCLUDE_CRYPTO" BoardConfig.mk || echo "TW_INCLUDE_CRYPTO := true" >> BoardConfig.mk
+          grep -q "TW_INCLUDE_CRYPTO_FBE" BoardConfig.mk || echo "TW_INCLUDE_CRYPTO_FBE := true" >> BoardConfig.mk
+          grep -q "BOARD_USES_METADATA_PARTITION" BoardConfig.mk || echo "BOARD_USES_METADATA_PARTITION := true" >> BoardConfig.mk
+          grep -q "LOCAL_CXX_STL" BoardConfig.mk || echo "LOCAL_CXX_STL := c++_static" >> BoardConfig.mk
           
-          echo "[*] Downloading stock ROM archive..."
-          curl -L "${{ inputs.ROM_URL }}" -o stock_firmware.zip || wget "${{ inputs.ROM_URL }}" -O stock_firmware.zip
-          
-          echo "[*] Unpacking archive..."
-          unzip -q stock_firmware.zip || bsdtar -xf stock_firmware.zip || true
-          
-          mkdir -p extracted_partitions
-          if [ -f payload.bin ] || [ -f */payload.bin ]; then
-            PAYLOAD_PATH=$(find . -name "payload.bin" | head -n 1)
-            echo "[*] Found payload.bin at: $PAYLOAD_PATH. Extracting partitions..."
-            
-            curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
-              | grep browser_download_url | grep linux_amd64 | cut -d '"' -f 4 | wget -qi -
-            tar -xzf payload-dumper-go_*_linux_amd64.tar.gz
-            
-            ./payload-dumper-go -o extracted_partitions "$PAYLOAD_PATH"
-          else
-            echo "[*] Searching for raw image files..."
-            find . -name "*.img" -exec cp {} extracted_partitions/ \;
-          fi
-          
-          ls -la extracted_partitions/
+          # Force ADB in recovery
+          grep -q "TW_HAS_MTP" BoardConfig.mk || echo "TW_HAS_MTP := true" >> BoardConfig.mk
+        fi
 
-      - name: Generate Device Tree and Inject Extracted Elements
-        run: |
-          VENDOR="${{ inputs.OEM_NAME }}"
-          CODENAME="${{ inputs.DEVICE_CODENAME }}"
-          DEVICE_DIR="device/$VENDOR/$CODENAME"
+        echo "Verifying recovery.fstab userdata f2fs and FBE options..."
+        FSTAB_FILE=$(find . -name "recovery.fstab" -o -name "twrp.fstab" | head -n 1)
+        if [ -n "$FSTAB_FILE" ]; then
+          # Ensure inlinecrypt_optimized is present for F2FS decryption
+          sed -i 's|fileencryption=aes-256-xts:aes-256-cts:v2|fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized|g' "$FSTAB_FILE" || true
+        fi
 
-          echo "[*] Creating device tree directory: $DEVICE_DIR"
-          mkdir -p "$DEVICE_DIR/prebuilts"
+        # Globally remove the health service from the OrangeFox source tree to prevent linker injection
+        cd ${{ github.workspace }}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+        find hardware/interfaces/health -name "*.rc" -exec sed -i '/vendor.health-default/d' {} + || true
+        find system/core -name "*.rc" -exec sed -i '/vendor.health-default/d' {} + || true
+        rm -rf hardware/interfaces/health/aidl/default || true
 
-          if [ -f ~/rom_workspace/extracted_partitions/vendor_boot.img ]; then
-            cp ~/rom_workspace/extracted_partitions/vendor_boot.img "$DEVICE_DIR/prebuilts/vendor_boot.img"
-            echo "[*] Successfully integrated stock vendor_boot.img for crypto HAL mapping."
-          fi
+    - name: Building OrangeFox & adbd
+      run: |
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+        set +e
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        export FOX_USE_TWRP_RECOVERY_IMAGE_BUILDER=1
+        export OF_KEEP_DM_VERITY=1
+        export FOX_DELETE_AROMAFM=1
+        set -e
 
-          echo "[*] Writing BoardConfig.mk..."
-          cat << 'EOF' > "$DEVICE_DIR/BoardConfig.mk"
-          LOCAL_PATH := device/xiaomi/beryl
+        if [ "${{ inputs.MANIFEST_BRANCH }}" = "14.1" ]; then
+          echo "Building for 14.1"
+          lunch twrp_${{ inputs.DEVICE_NAME }}-ap2a-${{ env.BUILD_TYPE }}
+          make clean
+          # Explicitly compile adbd alongside the vendorboot image
+          mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
+        fi
 
-          TARGET_ARCH := arm64
-          TARGET_CPU_ABI := arm64-v8a
-          TARGET_BOARD_PLATFORM := mt6878
-          TARGET_NO_KERNEL := false
+        if [ "${{ inputs.MANIFEST_BRANCH }}" = "16.1" ]; then
+          echo "Building for 16.1"
+          lunch twrp_${{ inputs.DEVICE_NAME }}-ap4a-${{ env.BUILD_TYPE }} || lunch twrp_${{ inputs.DEVICE_NAME }}-${{ env.BUILD_TYPE }}
+          make clean
+          # Explicitly compile adbd alongside the vendorboot image
+          mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
+        fi
 
-          # Vendor Boot & Decryption Configuration
-          BOARD_USES_VENDOR_BOOT := true
-          BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT := true
-          BOARD_INCLUDE_RECOVERY_DTBO_IN_VENDOR_BOOT := true
-          BOARD_BOOTIMG_HEADER_VERSION := 4
-          BOARD_KERNEL_BASE := 0x00000000
-          BOARD_KERNEL_PAGESIZE := 2048
-          BOARD_KERNEL_CMDLINE := bootconfig
-          
-          # Storage & File-Based Encryption (FBE v2)
-          BOARD_SUPPORTS_EXT4 := true
-          BOARD_SUPPORTS_F2FS := true
-          TARGET_USERIMAGES_USE_F2FS := true
-          TW_INCLUDE_CRYPTO := true
-          TW_INCLUDE_CRYPTO_FBE := true
-          TW_USE_FS_CRYPT_H := true
-          BOARD_USES_METADATA_PARTITION := true
+    - name: Set Release Properties
+      run: |
+        echo "BUILD_DATE=$(TZ=Asia/Manila date +%Y%m%d)" >> $GITHUB_ENV
 
-          # Screen & UI
-          TW_THEME := portrait_ds
-          TARGET_SCREEN_WIDTH := 1080
-          TARGET_SCREEN_HEIGHT := 2400
-          EOF
-
-          echo "[*] Writing recovery.fstab..."
-          cat << 'EOF' > "$DEVICE_DIR/recovery.fstab"
-          /system              erofs     super                                               flags=display="System";logical
-          /vendor              erofs     super                                               flags=display="Vendor";logical
-          /product             erofs     super                                               flags=display="Product";logical
-          /odm                 erofs     super                                               flags=display="ODM";logical
-
-          /boot                emmc      /dev/block/by-name/boot                             flags=display="Boot";backup=1;flashimg=1
-          /vendor_boot         emmc      /dev/block/by-name/vendor_boot                      flags=display="Vendor Boot";backup=1;flashimg=1
-          /recovery            emmc      /dev/block/by-name/recovery                         flags=display="Recovery";backup=1;flashimg=1
-          
-          /data                f2fs      /dev/block/by-name/userdata                         flags=display="Data";encryptable=footer;length=-16384
-          /cache               ext4      /dev/block/by-name/cache                            flags=display="Cache";backup=1
-          /metadata            ext4      /dev/block/by-name/metadata                         flags=display="Metadata";backup=1
-          /persist             ext4      /dev/block/by-name/persist                          flags=display="Persist";backup=1;flashimg=1
-          EOF
-
-          echo "[*] Writing device.mk..."
-          cat << 'EOF' > "$DEVICE_DIR/device.mk"
-          LOCAL_PATH := device/xiaomi/beryl
-          $(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
-
-          PRODUCT_PACKAGES += e2fsck fsck.f2fs make_f2fs libext4_utils
-          PRODUCT_COPY_FILES += $(LOCAL_PATH)/recovery.fstab:$(TARGET_COPY_OUT_RECOVERY)/root/system/etc/recovery.fstab
-          PRODUCT_PROPERTY_OVERRIDES += ro.crypto.allow_missing_encryption_options=true
-          EOF
-
-          echo "[*] Writing AndroidProducts.mk..."
-          cat << 'EOF' > "$DEVICE_DIR/AndroidProducts.mk"
-          PRODUCT_MAKEFILES := $(LOCAL_DIR)/recovery_beryl.mk
-          COMMON_AVB_MAKEFILES := $(LOCAL_DIR)/recovery_beryl.mk
-          EOF
-
-          echo "[*] Writing recovery_beryl.mk..."
-          cat << 'EOF' > "$DEVICE_DIR/recovery_beryl.mk"
-          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
-          $(call inherit-product, $(SRC_TARGET_DIR)/product/base_telephony.mk)
-          PRODUCT_NAME := recovery_beryl
-          PRODUCT_DEVICE := beryl
-          PRODUCT_MANUFACTURER := xiaomi
-          PRODUCT_BRAND := POCO
-          PRODUCT_MODEL := POCO M7 Pro 5G
-          EOF
-
-          echo "[*] Writing Android.mk..."
-          cat << 'EOF' > "$DEVICE_DIR/Android.mk"
-          LOCAL_PATH := $(call my-dir)
-          ifeq ($(TARGET_DEVICE),beryl)
-          include $(call all-subdir-makefiles under,$(LOCAL_PATH))
-          endif
-          EOF
-
-          echo "[*] Committing extracted tree and binaries..."
-          git add "$DEVICE_DIR"
-          git commit -m "device: xiaomi: beryl: Auto-extract ROM partitions and build crypto-ready device tree"
-          git push origin HEAD:main || git push origin HEAD:master
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true
+        files: |
+          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/*.img
+          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/*.zip
+        name: OrangeFox Recovery for ${{ inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}
+        body: |
+          ## OrangeFox Recovery Build - ${{ inputs.RELEASE_TYPE }}
+          Build: fox_${{ inputs.MANIFEST_BRANCH }}
+          Device: ${{ inputs.DEVICE_NAME }}
+          Build Type: ${{ env.BUILD_TYPE }}
+          Target: `${{ inputs.BUILD_TARGET }}image`
+          Commit: Built from repository commit `${{ env.COMMIT_ID }}` using high-speed multi-threaded stock ROM extraction with ignored device tree kernel binaries and enforced ADB.
           

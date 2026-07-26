@@ -51,6 +51,18 @@ jobs:
 
     - name: Generate Base Device Tree
       run: |
+        echo "Patching sebaubuntu_libs to fix fstab unpacking error..."
+        python3 -c "
+        import sys, os
+        for p in sys.path:
+            f = os.path.join(p, 'sebaubuntu_libs', 'libandroid', 'fstab', '__init__.py')
+            if os.path.exists(f):
+                with open(f, 'r') as r: d = r.read()
+                # Rewrite the strict 5-variable split rule to automatically pad missing columns
+                d = d.replace('src, mount_point, fs_type, mnt_flags, fs_flags = line.split()', 'src, mount_point, fs_type, mnt_flags, fs_flags = (line.split() + [\"\", \"\", \"\", \"\"])[:5]')
+                with open(f, 'w') as w: w.write(d)
+        "
+        
         echo "Running twrpdtgen on vendor_boot.img..."
         python3 -m twrpdtgen extracted/vendor_boot.img -o workspace/
 

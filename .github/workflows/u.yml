@@ -1,192 +1,203 @@
-name: OrangeFox - Build
+name: Generate Device Tree
 
 on:
   workflow_dispatch:
     inputs:
-      MANIFEST_BRANCH:
-        description: 'OrangeFox Manifest Branch'
+      ROM_URL:
+        description: 'Direct Download URL of the Stock ROM (.zip)'
         required: true
-        default: '14.1'
-        type: choice
-        options:
-        - 14.1
-        - 12.1
-      DEVICE_PATH:
-        description: 'Specify your Device Path'
-        required: true
-        default: 'device/xiaomi/beryl'
-      DEVICE_NAME:
-        description: 'Specify your Device Codename'
-        required: true
-        default: 'beryl'
-      RELEASE_TYPE:
-        description: 'Specify your Release Type'
-        required: true
-        default: 'Debug'
-        type: choice
-        options:
-        - Release
-        - Debug
-      BUILD_TARGET:
-        description: 'Specify your Build Target'
-        required: true
-        default: 'vendorboot'
-        type: choice
-        options:
-        - boot
-        - recovery
-        - vendorboot
+        type: string
 
 jobs:
   build:
-    name: Build OFR by ${{ github.actor }}
+    name: Extract and Generate Tree
     runs-on: ubuntu-22.04
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      BUILD_TYPE: 'eng'
     permissions:
-      contents: write
-      
+      contents: write 
+    
     steps:
-    - name: Checkout Root Repository
+    - name: Checkout Repository
       uses: actions/checkout@v4
-              
-    - name: Clean-up Environment
-      uses: rokibhasansagar/slimhub_actions@main
 
-    - name: Swap Space
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 16
-      
-    - name: Build Environment
+    - name: Set up Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y aria2 cpio python3-pip
-        git clone https://gitlab.com/OrangeFox/misc/scripts.git -b master
-        cd scripts
-        sudo bash setup/android_build_env.sh
-      
-    - name: Set-up Manifest & Sync
+        sudo apt-get install -y aria2 p7zip-full cpio lz4 wget mkbootimg curl
+        pip3 install twrpdtgen
+
+    - name: Install payload-dumper-go
       run: |
-        mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
-        cd ${GITHUB_WORKSPACE}/OrangeFox
-        git config --global user.name "${{ github.actor }}"
-        git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
-        git clone https://gitlab.com/OrangeFox/sync.git -b master
-        cd sync
-        ./orangefox_sync.sh --branch ${{ inputs.MANIFEST_BRANCH }} --path ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}  
+        wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+        tar -xf payload-dumper-go_1.2.2_linux_amd64.tar.gz
+        sudo mv payload-dumper-go /usr/local/bin/
+        rm payload-dumper-go_1.2.2_linux_amd64.tar.gz
+
+    - name: Download Stock ROM
+      run: |
+        echo "Downloading ROM..."
+        aria2c -x 16 -s 16 "${{ inputs.ROM_URL }}" -o rom.zip
+
+    - name: Extract payload.bin
+      run: |
+        echo "Extracting payload.bin from ROM zip..."
+        unzip -j rom.zip payload.bin || 7z e rom.zip payload.bin
+        rm rom.zip
+
+    - name: Dump Partitions
+      run: |
+        echo "Dumping boot, init_boot, vendor_boot, dtbo, and vendor..."
+        payload-dumper-go -p boot,init_boot,vendor_boot,dtbo,vendor -o extracted payload.bin
+        rm payload.bin
+
+    - name: Generate Base Device Tree
+      run: |
+        echo "Patching sebaubuntu_libs to fix fstab unpacking error..."
+        python3 -c "
+        import sys, os
+        for p in sys.path:
+            f = os.path.join(p, 'sebaubuntu_libs', 'libandroid', 'fstab', '__init__.py')
+            if os.path.exists(f):
+                with open(f, 'r') as r: d = r.read()
+                d = d.replace('src, mount_point, fs_type, mnt_flags, fs_flags = line.split()', 'src, mount_point, fs_type, mnt_flags, fs_flags = (line.split() + [\"\", \"\", \"\", \"\"])[:5]')
+                with open(f, 'w') as w: w.write(d)
+        "
         
-        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+        echo "Running twrpdtgen on vendor_boot.img..."
+        python3 -m twrpdtgen extracted/vendor_boot.img -o workspace/
+
+    - name: Extract Prebuilts (Kernel & DTBO)
+      run: |
+        echo "Downloading LineageOS unpack_bootimg.py..."
+        curl -sL "https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-21.0/unpack_bootimg.py" -o unpack_bootimg.py
         
-        # Strip heavy, unnecessary dependencies for recovery builds
-        if [ -f .repo/manifests/remove-minimal.xml ]; then
-          echo "Found remove-minimal.xml. Stripping blocks natively..."
-          sed -i '/guava/d' .repo/manifests/remove-minimal.xml
-          sed -i '/gflags/d' .repo/manifests/remove-minimal.xml
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all) external/guava external/gflags
+        echo "Unpacking boot.img..."
+        mkdir -p extracted_boot
+        python3 unpack_bootimg.py --boot_img extracted/boot.img --out extracted_boot
+        
+        TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
+        echo "Creating prebuilt directory in $TREE_PATH..."
+        mkdir -p $TREE_PATH/prebuilt
+        
+        echo "Moving kernel and DTBO to device tree..."
+        find extracted_boot -type f -name "*kernel*" -exec cp {} $TREE_PATH/prebuilt/kernel \;
+        cp extracted/dtbo.img $TREE_PATH/prebuilt/dtbo.img
+        
+        echo "Ensuring BoardConfig.mk points to the prebuilt kernel and DTBO..."
+        # Link Kernel
+        if grep -q "TARGET_PREBUILT_KERNEL" $TREE_PATH/BoardConfig.mk; then
+          sed -i 's|TARGET_PREBUILT_KERNEL := .*|TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel|g' $TREE_PATH/BoardConfig.mk
         else
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc --all) external/guava external/gflags
+          echo "TARGET_PREBUILT_KERNEL := \$(DEVICE_PATH)/prebuilt/kernel" >> $TREE_PATH/BoardConfig.mk
         fi
-
-    - name: Move Local Device Tree to Build Space
-      run: |
-        TARGET_PATH="${{ github.workspace }}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/${{ inputs.DEVICE_PATH }}"
-        mkdir -p "${TARGET_PATH}"
         
-        echo "Copying repository tree files from root into build environment..."
-        rsync -av --exclude='.git' --exclude='.github' --exclude='OrangeFox' ./ "${TARGET_PATH}/"
-        
-        cd "${TARGET_PATH}"
-        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        # Link DTBO
+        if grep -q "BOARD_PREBUILT_DTBOIMAGE" $TREE_PATH/BoardConfig.mk; then
+          sed -i 's|BOARD_PREBUILT_DTBOIMAGE := .*|BOARD_PREBUILT_DTBOIMAGE := $(DEVICE_PATH)/prebuilt/dtbo.img|g' $TREE_PATH/BoardConfig.mk
+        else
+          echo "BOARD_PREBUILT_DTBOIMAGE := \$(DEVICE_PATH)/prebuilt/dtbo.img" >> $TREE_PATH/BoardConfig.mk
+          echo "BOARD_INCLUDE_DTB_IN_BOOTIMG := true" >> $TREE_PATH/BoardConfig.mk
+        fi
 
-    - name: Sanitize VINTF, Crypto & Kill Health Service Crash
+    - name: Mount Vendor & Extract Proprietary Blobs
       run: |
-        TARGET_PATH="${{ github.workspace }}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/${{ inputs.DEVICE_PATH }}"
-        cd "${TARGET_PATH}"
+        echo "Mounting EROFS vendor.img..."
+        mkdir -p vendor_mnt
+        sudo mount -t erofs -o ro,loop extracted/vendor.img vendor_mnt
         
-        echo "Stripping incompatible VINTF manifests to prevent libvintf 8.0/9.0 parsing errors..."
-        find . -type f \( -name "*gatekeeper*.xml" -o -name "*keymint*.xml" -o -name "*secure_element*.xml" \) -delete || true
+        TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
         
-        echo "Removing broken health service triggers to fix C++ linker aborts..."
-        find . -name "*.rc" -exec sed -i '/gatekeeper/d' {} + || true
-        find . -name "*.rc" -exec sed -i '/keymint/d' {} + || true
-        find . -name "*.rc" -exec sed -i '/se_omapi/d' {} + || true
-        find . -name "*.rc" -exec sed -i '/health-service/d' {} + || true
-        find . -name "*.rc" -exec sed -i '/vendor.health-default/d' {} + || true
+        echo "Creating recovery/root/vendor structure..."
+        mkdir -p $TREE_PATH/recovery/root/vendor/bin/hw
+        mkdir -p $TREE_PATH/recovery/root/vendor/lib64/hw
+        mkdir -p $TREE_PATH/recovery/root/vendor/etc/init
+        mkdir -p $TREE_PATH/recovery/root/vendor/lib/modules
+        mkdir -p $TREE_PATH/recovery/root/vendor/firmware
+        
+        echo "Copying Hardware Keystore, Gatekeeper, and TEE Daemons..."
+        sudo cp vendor_mnt/bin/hw/android.hardware.security.keymint-service* $TREE_PATH/recovery/root/vendor/bin/hw/ || true
+        sudo cp vendor_mnt/bin/hw/android.hardware.gatekeeper@1.0-service* $TREE_PATH/recovery/root/vendor/bin/hw/ || true
+        sudo cp vendor_mnt/bin/tee* $TREE_PATH/recovery/root/vendor/bin/ || true
+        sudo cp vendor_mnt/bin/mitee* $TREE_PATH/recovery/root/vendor/bin/ || true
+        
+        echo "Copying Init Scripts and fstabs..."
+        sudo cp vendor_mnt/etc/init/android.hardware.security.keymint* $TREE_PATH/recovery/root/vendor/etc/init/ || true
+        sudo cp vendor_mnt/etc/init/android.hardware.gatekeeper* $TREE_PATH/recovery/root/vendor/etc/init/ || true
+        sudo cp vendor_mnt/etc/init/tee* $TREE_PATH/recovery/root/vendor/etc/init/ || true
+        sudo cp vendor_mnt/etc/fstab.* $TREE_PATH/recovery/root/vendor/etc/ || true
+        
+        echo "Copying Touch Drivers and Firmware..."
+        sudo find vendor_mnt/lib/modules -name "*fts_touch*.ko" -exec cp {} $TREE_PATH/recovery/root/vendor/lib/modules/ \; || true
+        sudo find vendor_mnt/lib/modules -name "*xiaomi_touch*.ko" -exec cp {} $TREE_PATH/recovery/root/vendor/lib/modules/ \; || true
+        sudo cp -r vendor_mnt/firmware/* $TREE_PATH/recovery/root/vendor/firmware/ || true
+        
+        echo "Fixing permissions on copied files..."
+        sudo chown -R $USER:$USER $TREE_PATH/recovery/root/vendor/
+        sudo umount vendor_mnt
 
-        echo "Disabling conflicting health-service target blocks from Android.mk / Android.bp..."
-        find . -name "Android.mk" -o -name "Android.bp" | xargs grep -l "health-service.example" 2>/dev/null | while read -r file; do
-          sed -i '/health-service.example/d' "$file" || true
-        done || true
-
-        echo "Ensuring ADB and FBE v2 Flags are properly mapped in BoardConfig.mk..."
-        if [ -f "BoardConfig.mk" ]; then
-          grep -q "TW_INCLUDE_CRYPTO" BoardConfig.mk || echo "TW_INCLUDE_CRYPTO := true" >> BoardConfig.mk
-          grep -q "TW_INCLUDE_CRYPTO_FBE" BoardConfig.mk || echo "TW_INCLUDE_CRYPTO_FBE := true" >> BoardConfig.mk
-          grep -q "BOARD_USES_METADATA_PARTITION" BoardConfig.mk || echo "BOARD_USES_METADATA_PARTITION := true" >> BoardConfig.mk
-          grep -q "LOCAL_CXX_STL" BoardConfig.mk || echo "LOCAL_CXX_STL := c++_static" >> BoardConfig.mk
-          
-          # Force ADB in recovery
-          grep -q "TW_HAS_MTP" BoardConfig.mk || echo "TW_HAS_MTP := true" >> BoardConfig.mk
-        fi
-
-        echo "Verifying recovery.fstab userdata f2fs and FBE options..."
-        FSTAB_FILE=$(find . -name "recovery.fstab" -o -name "twrp.fstab" | head -n 1)
-        if [ -n "$FSTAB_FILE" ]; then
-          # Ensure inlinecrypt_optimized is present for F2FS decryption
-          sed -i 's|fileencryption=aes-256-xts:aes-256-cts:v2|fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized|g' "$FSTAB_FILE" || true
-        fi
-
-        # Globally remove the health service from the OrangeFox source tree to prevent linker injection
-        cd ${{ github.workspace }}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
-        find hardware/interfaces/health -name "*.rc" -exec sed -i '/vendor.health-default/d' {} + || true
-        find system/core -name "*.rc" -exec sed -i '/vendor.health-default/d' {} + || true
-        rm -rf hardware/interfaces/health/aidl/default || true
-
-    - name: Building OrangeFox & adbd
+    - name: Patch BoardConfig.mk (VINTF & Crypto)
       run: |
-        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
-        set +e
-        source build/envsetup.sh
-        export ALLOW_MISSING_DEPENDENCIES=true
-        export FOX_USE_TWRP_RECOVERY_IMAGE_BUILDER=1
-        export OF_KEEP_DM_VERITY=1
-        export FOX_DELETE_AROMAFM=1
-        set -e
+        TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
+        BOARD_CONFIG="$TREE_PATH/BoardConfig.mk"
+        
+        echo "Disabling VINTF Parsing..."
+        sed -i 's/TARGET_USES_VINTF := true/TARGET_USES_VINTF := false/g' $BOARD_CONFIG
+        
+        echo "Adding hardware crypto libraries and metadata flags..."
+        cat << 'EOF' >> $BOARD_CONFIG
 
-        if [ "${{ inputs.MANIFEST_BRANCH }}" = "14.1" ]; then
-          echo "Building for 14.1"
-          lunch twrp_${{ inputs.DEVICE_NAME }}-ap2a-${{ env.BUILD_TYPE }}
-          make clean
-          # Explicitly compile adbd alongside the vendorboot image
-          mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
-        fi
+        # FBE Decryption & Metadata
+        BOARD_USES_METADATA_PARTITION := true
+        TW_INCLUDE_CRYPTO := true
+        TW_INCLUDE_CRYPTO_FBE := true
+        TW_USE_FSCRYPT_POLICY := 2
 
-        if [ "${{ inputs.MANIFEST_BRANCH }}" = "12.1" ]; then
-          echo "Building for 12.1"
-          lunch twrp_${{ inputs.DEVICE_NAME }}-eng || lunch twrp_${{ inputs.DEVICE_NAME }}-userdebug
-          make clean
-          mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
-        fi
+        # Vendor Modules required for TEE/Keymaster
+        TARGET_RECOVERY_DEVICE_MODULES += \
+            libkeymaster4 \
+            libkeymaster4_support \
+            libkeymaster_messages \
+            libhidltransport \
+            libhwbinder \
+            android.hardware.keymaster@4.0 \
+            android.hardware.gatekeeper@1.0 \
+            libkeystore-engine \
+            libkeystore-wifi-hidl
+        EOF
 
-    - name: Set Release Properties
+    - name: Patch recovery.fstab (F2FS Inlinecrypt)
       run: |
-        echo "BUILD_DATE=$(TZ=Asia/Manila date +%Y%m%d)" >> $GITHUB_ENV
+        TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
+        FSTAB=$(find $TREE_PATH -name "recovery.fstab" | head -n 1)
+        
+        if [ -n "$FSTAB" ]; then
+          echo "Patching /data f2fs encryption flags in $FSTAB..."
+          sed -i 's|fileencryption=aes-256-xts:aes-256-cts:v2|fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized|g' "$FSTAB"
+        fi
 
-    - name: Upload to Release
-      uses: softprops/action-gh-release@v2
-      with:
-        generate_release_notes: true
-        files: |
-          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/*.img
-          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/*.zip
-        name: OrangeFox Recovery for ${{ inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
-        tag_name: ${{ github.run_id }}
-        body: |
-          ## OrangeFox Recovery Build - ${{ inputs.RELEASE_TYPE }}
-          Build: fox_${{ inputs.MANIFEST_BRANCH }}
-          Device: ${{ inputs.DEVICE_NAME }}
-          Build Type: ${{ env.BUILD_TYPE }}
-          Target: `${{ inputs.BUILD_TARGET }}image`
-          Commit: Built from repository commit `${{ env.COMMIT_ID }}` using high-speed multi-threaded stock ROM extraction with ignored device tree kernel binaries and enforced ADB.
+    - name: Commit and Push to Repository Root
+      run: |
+        TREE_PATH=$(find workspace -mindepth 2 -maxdepth 3 -type d | head -n 1)
+        
+        echo "Scrubbing repository root (keeping .git, .github, and working directories)..."
+        find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' ! -name 'workspace' ! -name 'extracted' ! -name 'extracted_boot' ! -name 'unpack_bootimg.py' -exec rm -rf {} +
+        
+        echo "Moving generated files to the root of the repository..."
+        cp -a $TREE_PATH/* ./
+        
+        echo "Cleaning up heavy intermediate files..."
+        rm -rf workspace extracted extracted_boot payload-dumper-go unpack_bootimg.py
+        
+        echo "Configuring git and pushing changes..."
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        
+        git add --all
+        git commit -m "feat: Auto-generate clean device tree with DTBO, kernel, and extended vendor blobs" || echo "No changes to commit"
+        
+        BRANCH=${GITHUB_REF#refs/heads/}
+        
+        echo "Syncing with remote branch $BRANCH..."
+        git pull --rebase origin $BRANCH
+        
+        echo "Pushing device tree to repository..."
+        git push origin HEAD:$BRANCH
